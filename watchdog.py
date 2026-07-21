@@ -1,5 +1,3 @@
-import json
-import os
 import socket
 import subprocess
 import time
@@ -10,29 +8,54 @@ import psutil
 import requests
 
 # ==========================================================
-# CONFIGURAÇÕES
+# REGIÃO: INICIALIZAÇÃO
 # ==========================================================
-
-LIMITE_CPU = 75
-TEMPO_CRITICO = 10
-TEMPO_PAUSADO = 30
-
-ENDPOINT_URL = "https://flux-heartbeat.lovable.app/api/public/ingest/2a3c35b4-b740-4fe0-b216-c7b2c50a137e"
-
-API_KEY = "pk_0e55c97681154727a54be6541f88db186fec32bcdb1e484e86b043913cbbe495"
+# Constantes fixas do agente. Diferente da configuração operacional
+# (sala, URL, limites de CPU etc.), estes valores identificam ONDE
+# o agente busca informações e NÃO vêm do banco - são parte do
+# próprio agente, assim como já eram no script original.
 
 HOSTNAME = socket.gethostname()
 
-CONFIG_FILE = "config.json"
+# Endpoint único do Lovable, usado tanto para ler configuração
+# quanto para enviar heartbeat/eventos. O que muda é o VERBO HTTP
+# e a forma de envio dos dados, não a URL:
+#
+#   GET  ENDPOINT_URL?hostname=X   -> leitura de configuração
+#                                      (idempotente, sem efeitos colaterais,
+#                                      dados vão na query string)
+#
+#   POST ENDPOINT_URL              -> heartbeat e eventos
+#                                      (envia/ingere dados, corpo em JSON)
+#
+ENDPOINT_URL = "https://flux-heartbeat.lovable.app/api/public/ingest/2a3c35b4-b740-4fe0-b216-c7b2c50a137e"
+API_KEY = "pk_0e55c97681154727a54be6541f88db186fec32bcdb1e484e86b043913cbbe495"
 
+# Intervalo entre tentativas de busca de configuração, caso o
+# banco esteja indisponível na inicialização.
+INTERVALO_RETRY_CONFIG = 15  # segundos
+
+# Valores padrão de segurança, usados SOMENTE se o banco não
+# retornar algum desses campos (mesmo comportamento defensivo que
+# o carregar_config() original tinha para "url" e "chrome_path").
+PADRAO_CHROME_PATH = "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
+PADRAO_LIMITE_CPU = 75
+PADRAO_TEMPO_CRITICO = 10
+PADRAO_TEMPO_PAUSADO = 30
+
+# Configuração ativa em memória (preenchida por buscar_configuracao_remota)
+CONFIG = {}
+
+# Contador de segundos consecutivos com CPU acima do limite
 segundos_cpu_alta = 0
 
 
 # ==========================================================
-# LOG
+# REGIÃO: LOG
 # ==========================================================
 
 def log_local(msg):
+    """Escreve uma mensagem no console e no arquivo watchdog.log."""
 
     texto = f"[{datetime.now()}] {msg}"
 
@@ -43,68 +66,98 @@ def log_local(msg):
 
 
 # ==========================================================
-# CONFIG
+# REGIÃO: CONFIGURAÇÃO (BANCO DE DADOS - LOVABLE)
 # ==========================================================
+# Substitui completamente o config.json local. carregar_config() e
+# criar_config_padrao() deixam de existir. Toda configuração agora
+# vem do banco, identificada pelo hostname da máquina.
 
-def criar_config_padrao():
+def buscar_configuracao_remota(hostname):
+    """
+    Consulta o banco de dados (Lovable) e retorna a configuração
+    completa do dispositivo identificado por 'hostname'.
+
+    Faz tentativas indefinidas em caso de falha, pois o watchdog
+    não pode operar sem configuração (não há mais fallback local).
+    """
+
+    while True:
+
+        try:
+
+            headers = {
+                "Authorization": f"Bearer {API_KEY}"
+            }
+
+            params = {
+                "hostname": hostname
+            }
+
+            log_local(f"Consultando configuração remota (GET) para '{hostname}'...")
+
+            # GET: leitura de dados, parâmetros na query string,
+            # sem body e sem efeitos colaterais no servidor.
+            resposta = requests.get(
+                ENDPOINT_URL,
+                headers=headers,
+                params=params,
+                timeout=10
+            )
+
+            resposta.raise_for_status()
+
+            dados = resposta.json()
+
+            config = normalizar_configuracao(hostname, dados)
+
+            log_local("Configuração remota carregada com sucesso.")
+
+            return config
+
+        except Exception as e:
+
+            log_local(f"Erro ao buscar configuração remota: {e}")
+            log_local(f"Nova tentativa em {INTERVALO_RETRY_CONFIG}s...")
+
+            time.sleep(INTERVALO_RETRY_CONFIG)
+
+
+def normalizar_configuracao(hostname, dados):
+    """
+    Garante que todos os campos obrigatórios existam na configuração,
+    aplicando valores padrão quando necessário (mesma postura defensiva
+    do carregar_config() original).
+    """
 
     config = {
-        "hostname": HOSTNAME,
-        "url": "",
-        "chrome_path": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
+        "hostname": hostname,
+        "hospital": dados.get("hospital", ""),
+        "sala": dados.get("sala", ""),
+        "url": dados.get("url", ""),
+        "chrome_path": dados.get("chrome_path", PADRAO_CHROME_PATH),
+        "limite_cpu": dados.get("limite_cpu", PADRAO_LIMITE_CPU),
+        "tempo_critico": dados.get("tempo_critico", PADRAO_TEMPO_CRITICO),
+        "tempo_pausado": dados.get("tempo_pausado", PADRAO_TEMPO_PAUSADO),
     }
-
-    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-        json.dump(config, f, indent=4)
-
-    log_local("config.json criado. Configure a URL da sala.")
 
     return config
 
 
-def carregar_config():
-
-    if not os.path.exists(CONFIG_FILE):
-        return criar_config_padrao()
-
-    try:
-
-        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-
-            config = json.load(f)
-
-            if "url" not in config:
-                config["url"] = ""
-
-            if "chrome_path" not in config:
-                config["chrome_path"] = "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
-
-            return config
-
-    except Exception as e:
-
-        log_local(f"Erro lendo config.json: {e}")
-
-        return criar_config_padrao()
-
-
-CONFIG = carregar_config()
-
-URL_ONECONNECT = CONFIG["url"]
-
-CHROME_PATH = CONFIG["chrome_path"]
-
-
 # ==========================================================
-# ENDPOINT
+# REGIÃO: COMUNICAÇÃO API (EVENTOS E HEARTBEAT)
 # ==========================================================
+# Toda comunicação HTTP com o Lovable fica concentrada aqui.
 
 def enviar_evento(tipo, mensagem, extra=None):
+    """
+    Envia um evento pontual (ex: chrome_fechado, cpu_critica, erro_watchdog).
+    Mantido igual ao script original para não perder nenhum registro
+    de auditoria já existente.
+    """
 
     payload = {
-
-        "name": HOSTNAME,
-        "hostname": HOSTNAME,
+        "name": CONFIG.get("hostname", HOSTNAME),
+        "hostname": CONFIG.get("hostname", HOSTNAME),
         "status": "online",
         "tipo": tipo,
         "mensagem": mensagem,
@@ -121,6 +174,7 @@ def enviar_evento(tipo, mensagem, extra=None):
 
     try:
 
+        # POST: envio/ingestão de dados, corpo em JSON.
         requests.post(
             ENDPOINT_URL,
             json=payload,
@@ -130,26 +184,72 @@ def enviar_evento(tipo, mensagem, extra=None):
 
     except Exception as e:
 
-        log_local(f"Erro endpoint: {e}")
+        log_local(f"Erro endpoint (evento): {e}")
 
 
-# ==========================================================
-# CHROME
-# ==========================================================
+def enviar_heartbeat(cpu, memoria_ram, chrome_aberto, capture_aberto, status="online"):
+    """
+    Envia o heartbeat completo do dispositivo. O Lovable deve
+    atualizar apenas uma linha por dispositivo (upsert por hostname).
+    """
 
-def abrir_chrome():
+    agora = str(datetime.now())
 
-    global URL_ONECONNECT
+    payload = {
+        "hostname": CONFIG.get("hostname", HOSTNAME),
+        "hospital": CONFIG.get("hospital", ""),
+        "sala": CONFIG.get("sala", ""),
+        "cpu": cpu,
+        "memoria_ram": memoria_ram,
+        "status": status,
+        "chrome_aberto": chrome_aberto,
+        "capture_aberto": capture_aberto,
+        "timestamp": agora,
+        "last_seen": agora
+    }
+
+    headers = {
+        "Authorization": f"Bearer {API_KEY}",
+        "Content-Type": "application/json"
+    }
 
     try:
 
-        CONFIG = carregar_config()
+        # POST: envio/ingestão de dados, corpo em JSON.
+        requests.post(
+            ENDPOINT_URL,
+            json=payload,
+            headers=headers,
+            timeout=5
+        )
 
-        URL_ONECONNECT = CONFIG["url"]
+    except Exception as e:
 
-        CHROME_PATH = CONFIG["chrome_path"]
+        log_local(f"Erro endpoint (heartbeat): {e}")
 
-        if URL_ONECONNECT.strip() == "":
+
+# ==========================================================
+# REGIÃO: CHROME
+# ==========================================================
+
+def abrir_chrome():
+    """
+    Abre o Chrome na sala configurada. Assim como no script original,
+    a configuração é recarregada antes de abrir, garantindo que a
+    URL/caminho mais recentes (definidos no banco) sejam usados mesmo
+    que tenham sido alterados após o início do watchdog.
+    """
+
+    global CONFIG
+
+    try:
+
+        CONFIG = buscar_configuracao_remota(HOSTNAME)
+
+        url_sala = CONFIG["url"]
+        chrome_path = CONFIG["chrome_path"]
+
+        if url_sala.strip() == "":
 
             log_local("Nenhuma URL configurada.")
 
@@ -159,12 +259,12 @@ def abrir_chrome():
 
             return
 
-        log_local(f"Abrindo URL: {URL_ONECONNECT}")
+        log_local(f"Abrindo URL: {url_sala}")
 
         subprocess.Popen([
-            CHROME_PATH,
+            chrome_path,
             "--new-window",
-            URL_ONECONNECT
+            url_sala
         ])
 
     except Exception as e:
@@ -173,10 +273,11 @@ def abrir_chrome():
 
 
 # ==========================================================
-# PROCESSOS
+# REGIÃO: PROCESSOS
 # ==========================================================
 
 def finalizar_processos():
+    """Encerra Chrome e 4KCaptureUtility. Lógica idêntica ao original."""
 
     chrome = False
     capture = False
@@ -231,104 +332,165 @@ def finalizar_processos():
     return chrome, capture
 
 
+def verificar_processos_ativos():
+    """
+    Verifica (sem encerrar) se Chrome e 4KCaptureUtility estão em
+    execução. Usado apenas para compor o heartbeat.
+    """
+
+    chrome_aberto = False
+    capture_aberto = False
+
+    for proc in psutil.process_iter(["name"]):
+
+        try:
+
+            nome = proc.info["name"]
+
+            if nome is None:
+                continue
+
+            nome = nome.lower()
+
+            if nome == "chrome.exe":
+                chrome_aberto = True
+
+            elif nome == "4kcaptureutility.exe":
+                capture_aberto = True
+
+        except Exception:
+            continue
+
+    return chrome_aberto, capture_aberto
+
+
 # ==========================================================
-# INÍCIO
+# REGIÃO: COMANDOS REMOTOS (RESERVADO - ETAPA 2)
+# ==========================================================
+# NÃO IMPLEMENTAR AGORA.
+# Nesta etapa futura, o watchdog consultará periodicamente uma fila
+# de comandos no banco (restart_chrome, restart_capture, restart_all,
+# shutdown, reboot, refresh_page, kill_chrome, kill_capture, open_url),
+# executará o comando recebido e enviará o resultado de volta.
+# A região existe apenas para deixar clara a próxima extensão do
+# código; nenhuma função é chamada no loop principal ainda.
+
+
+# ==========================================================
+# REGIÃO: MONITORAMENTO CPU / LOOP PRINCIPAL
 # ==========================================================
 
-log_local("====================================")
-log_local("WATCHDOG INICIADO")
-log_local(f"Hostname: {HOSTNAME}")
-log_local(f"URL: {URL_ONECONNECT}")
-log_local("====================================")
+def iniciar_watchdog():
 
+    global CONFIG, segundos_cpu_alta
 
-# ==========================================================
-# LOOP
-# ==========================================================
+    # 1. Descobrir hostname (já feito na inicialização do módulo)
+    # 2/3/4. Consultar banco e baixar configuração completa
+    CONFIG = buscar_configuracao_remota(HOSTNAME)
 
-while True:
+    log_local("====================================")
+    log_local("WATCHDOG INICIADO")
+    log_local(f"Hostname: {CONFIG['hostname']}")
+    log_local(f"Hospital: {CONFIG['hospital']}")
+    log_local(f"Sala: {CONFIG['sala']}")
+    log_local(f"URL: {CONFIG['url']}")
+    log_local("====================================")
 
-    try:
+    # 5. Iniciar monitoramento
+    while True:
 
-        cpu = psutil.cpu_percent(interval=1)
+        try:
 
-        log_local(f"CPU {cpu}%")
+            limite_cpu = CONFIG["limite_cpu"]
+            tempo_critico = CONFIG["tempo_critico"]
+            tempo_pausado = CONFIG["tempo_pausado"]
 
-        enviar_evento(
-            "heartbeat",
-            "Monitorando",
-            {
-                "cpu": cpu
-            }
-        )
+            cpu = psutil.cpu_percent(interval=1)
+            memoria_ram = psutil.virtual_memory().percent
 
-        if cpu >= LIMITE_CPU:
+            chrome_aberto, capture_aberto = verificar_processos_ativos()
 
-            segundos_cpu_alta += 1
+            log_local(f"CPU {cpu}% | RAM {memoria_ram}%")
 
-            log_local(
-                f"CPU crítica por {segundos_cpu_alta}s"
+            enviar_heartbeat(
+                cpu=cpu,
+                memoria_ram=memoria_ram,
+                chrome_aberto=chrome_aberto,
+                capture_aberto=capture_aberto,
+                status="online"
             )
 
-        else:
+            if cpu >= limite_cpu:
 
-            segundos_cpu_alta = 0
+                segundos_cpu_alta += 1
 
-        if segundos_cpu_alta >= TEMPO_CRITICO:
+                log_local(f"CPU crítica por {segundos_cpu_alta}s")
 
-            enviar_evento(
-                "cpu_critica",
-                "CPU acima do limite",
-                {
-                    "cpu": cpu
-                }
-            )
+            else:
 
-            chrome, capture = finalizar_processos()
+                segundos_cpu_alta = 0
 
-            if not chrome:
+            if segundos_cpu_alta >= tempo_critico:
 
                 enviar_evento(
-                    "chrome_nao_encontrado",
-                    "Chrome não estava em execução"
+                    "cpu_critica",
+                    "CPU acima do limite",
+                    {
+                        "cpu": cpu
+                    }
                 )
 
-            if not capture:
+                chrome, capture = finalizar_processos()
+
+                if not chrome:
+
+                    enviar_evento(
+                        "chrome_nao_encontrado",
+                        "Chrome não estava em execução"
+                    )
+
+                if not capture:
+
+                    enviar_evento(
+                        "4k_nao_encontrado",
+                        "4KCaptureUtility não estava em execução"
+                    )
+
+                log_local(f"Aguardando {tempo_pausado}s...")
+
+                time.sleep(tempo_pausado)
+
+                abrir_chrome()
 
                 enviar_evento(
-                    "4k_nao_encontrado",
-                    "4KCaptureUtility não estava em execução"
+                    "chrome_reaberto",
+                    "Chrome reaberto automaticamente",
+                    {
+                        "url": CONFIG["url"]
+                    }
                 )
 
-            log_local(
-                f"Aguardando {TEMPO_PAUSADO}s..."
-            )
+                segundos_cpu_alta = 0
 
-            time.sleep(TEMPO_PAUSADO)
+            time.sleep(1)
 
-            abrir_chrome()
+        except Exception as e:
+
+            log_local(f"ERRO WATCHDOG: {e}")
+
+            traceback.print_exc()
 
             enviar_evento(
-                "chrome_reaberto",
-                "Chrome reaberto automaticamente",
-                {
-                    "url": URL_ONECONNECT
-                }
+                "erro_watchdog",
+                str(e)
             )
 
-            segundos_cpu_alta = 0
+            time.sleep(5)
 
-        time.sleep(1)
 
-    except Exception as e:
+# ==========================================================
+# PONTO DE ENTRADA
+# ==========================================================
 
-        log_local(f"ERRO WATCHDOG: {e}")
-
-        traceback.print_exc()
-
-        enviar_evento(
-            "erro_watchdog",
-            str(e)
-        )
-
-        time.sleep(5)
+if __name__ == "__main__":
+    iniciar_watchdog()
