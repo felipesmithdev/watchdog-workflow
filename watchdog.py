@@ -42,7 +42,7 @@ INTERVALO_RETRY_CONFIG = 15  # segundos
 PADRAO_CHROME_PATH = "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
 PADRAO_LIMITE_CPU = 75
 PADRAO_TEMPO_CRITICO = 10
-PADRAO_TEMPO_PAUSADO = 30
+PADRAO_TEMPO_PAUSADO = 10
 
 # Configuração ativa em memória (preenchida por buscar_configuracao_remota)
 CONFIG = {}
