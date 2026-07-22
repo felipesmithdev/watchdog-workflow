@@ -30,7 +30,7 @@ jobs:
 
     - name: Build EXE
       run: |
-        pyinstaller --clean --onefile watchdog.py
+        pyinstaller --clean --onefile --noconsole watchdog.py
 
     - name: Upload EXE
       uses: actions/upload-artifact@v4
