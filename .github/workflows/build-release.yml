@@ -1,19 +1,16 @@
 name: Build e Release do Watchdog
 
-# Roda automaticamente ao empurrar uma tag de versão (ex: v1.0.0),
-# ou manualmente pela aba Actions do GitHub (sem criar release,
-# só pra gerar o .exe como artifact e testar o build).
 on:
   push:
     tags:
       - "v*.*.*"
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
-    # IMPORTANTE: precisa rodar em windows-latest. PyInstaller não faz
-    # cross-compile - gerar o .exe num runner Linux produziria um
-    # binário Linux, inútil pros KVMs. O runner tem que ser Windows.
     runs-on: windows-latest
 
     steps:
@@ -31,15 +28,15 @@ jobs:
           pip install pyinstaller
 
       - name: Build do .exe
-        run: pyinstaller --onefile --console --name watchdog main.py
+        run: pyinstaller --onefile --noconsole --name watchdog main.py
 
-      - name: Upload do artifact (toda execução, inclusive manual)
+      - name: Upload do artifact
         uses: actions/upload-artifact@v4
         with:
           name: watchdog-exe
           path: dist/watchdog.exe
 
-      - name: Criar Release no GitHub (apenas quando a tag é empurrada)
+      - name: Criar Release no GitHub
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
