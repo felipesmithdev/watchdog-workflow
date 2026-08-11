@@ -28,7 +28,7 @@ jobs:
           pip install pyinstaller
 
       - name: Build do .exe
-        run: pyinstaller --onefile --noconsole --name watchdog main.py
+        run: python -m PyInstaller --clean --onefile --noconsole watchdog.py
 
       - name: Upload do artifact
         uses: actions/upload-artifact@v4
